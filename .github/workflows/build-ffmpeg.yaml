@@ -73,6 +73,13 @@ jobs:
           ref: ${{ needs.check.outputs.helper-git-sha }}
           persist-credentials: false
           
+      - name: Patch mingw-w64-build to avoid savannah.gnu.org dependency
+        run: |
+          sed -i \
+            -e '/wget.*savannah\.gnu\.org/d' \
+            -e 's/system_type="\$(sh config\.guess)"/system_type="\$(gcc -dumpmachine)"/' \
+            patches/mingw-w64-build-r22.local
+
       - name: Install APT dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
