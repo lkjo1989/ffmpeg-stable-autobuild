@@ -40,7 +40,7 @@ jobs:
       - name: Get ffmpeg-stable-autobuild latest build
         id: ffmpeg-autobuild-info
         run: |
-          tag_name=$(gh api repos/$GITHUB_REPOSITORY/releases/latest -q .tag_name)
+          tag_name=$(gh api repos/$GITHUB_REPOSITORY/releases/latest -q .tag_name 2>/dev/null || true)
           echo version=${tag_name:25} >> $GITHUB_OUTPUT
           echo helper-git-sha=${tag_name:17:7} >> $GITHUB_OUTPUT
         env:
