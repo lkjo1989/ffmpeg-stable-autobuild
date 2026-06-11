@@ -109,6 +109,10 @@ jobs:
         # AOMedia moved cmake toolchains from build/cmake/toolchains to cmake/toolchains
         run: sed -i 's|../build/cmake/toolchains|../cmake/toolchains|g' cross_compile_ffmpeg.sh
 
+      - name: Patch FFmpeg NVENC for SDK API rename (countingType → countingTypeLSB)
+        # NVENC SDK renamed countingType to countingTypeLSB; patch nvenc.c after FFmpeg checkout
+        run: sed -i '/cd \$output_dir$/a\    sed -i "s/\\.countingType =/.countingTypeLSB =/g" libavcodec/nvenc.c' cross_compile_ffmpeg.sh
+
       - name: Patch mingw-w64-build to avoid savannah.gnu.org dependency
         # Replace config.guess download with gcc -dumpmachine (host is always x86_64-linux-gnu)
         run: |
