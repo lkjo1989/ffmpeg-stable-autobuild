@@ -26,7 +26,7 @@ jobs:
           version=$(curl -s https://endoflife.date/api/ffmpeg.json | jq -r .[0].latest)
           echo version=$version >> $GITHUB_OUTPUT
           
-      - name: Get ${{ vars.FWBH_REPOSITORY_OWNER }}/ffmpeg-windows-build-helpers latest commit
+      - name: Get ${{ vars.FWBH_REPOSITORY_OWNER || 'rdp' }}/ffmpeg-windows-build-helpers latest commit
         id: ffmpeg-helper-info
         run: |
           git_owner=${{ vars.FWBH_REPOSITORY_OWNER || 'rdp' }}
