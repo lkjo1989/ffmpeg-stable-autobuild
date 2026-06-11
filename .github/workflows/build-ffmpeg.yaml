@@ -12,10 +12,10 @@ on:
         type: boolean
   watch:
     types: [started]
-    
+
 concurrency:
   group: ${{ github.workflow }}
-  
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -24,47 +24,79 @@ jobs:
         id: ffmpeg-info
         run: |
           version=$(curl -s https://endoflife.date/api/ffmpeg.json | jq -r .[0].latest)
-          echo version=$version >> $GITHUB_OUTPUT
-          
+
+          # FFmpeg git tags drop the trailing ".0" for initial major/minor releases
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
+            version="${version%.0}"
+          fi
+
+          echo "version=$version" >> $GITHUB_OUTPUT
+
       - name: Get ${{ vars.FWBH_REPOSITORY_OWNER || 'rdp' }}/ffmpeg-windows-build-helpers latest commit
         id: ffmpeg-helper-info
         run: |
           git_owner=${{ vars.FWBH_REPOSITORY_OWNER || 'rdp' }}
           git_sha=$(gh api repos/$git_owner/ffmpeg-windows-build-helpers/commits/master -q .sha)
-          echo git-owner=$git_owner >> $GITHUB_OUTPUT
-          echo git-sha=$git_sha >> $GITHUB_OUTPUT
-          echo git-sha-short=${git_sha::7} >> $GITHUB_OUTPUT
+          echo "git-owner=$git_owner" >> $GITHUB_OUTPUT
+          echo "git-sha=$git_sha" >> $GITHUB_OUTPUT
+          echo "git-sha-short=${git_sha::7}" >> $GITHUB_OUTPUT
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          
+
       - name: Get ffmpeg-stable-autobuild latest build
         id: ffmpeg-autobuild-info
+        # Handle missing previous release (404) gracefully
         run: |
-          tag_name=$(gh api repos/$GITHUB_REPOSITORY/releases/latest -q .tag_name) || tag_name=""
-          echo version=${tag_name:25} >> $GITHUB_OUTPUT
-          echo helper-git-sha=${tag_name:17:7} >> $GITHUB_OUTPUT
+          if ! tag_name=$(gh api repos/$GITHUB_REPOSITORY/releases/latest -q .tag_name 2>/dev/null); then
+            echo "No previous release found."
+            echo "version=" >> $GITHUB_OUTPUT
+            echo "helper-git-sha=" >> $GITHUB_OUTPUT
+          else
+            echo "version=${tag_name:25}" >> $GITHUB_OUTPUT
+            echo "helper-git-sha=${tag_name:17:7}" >> $GITHUB_OUTPUT
+          fi
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          
+
       - name: Check if there is newer version or commit
+        id: check-build
         if: '! inputs.force_build'
-        run: >
-          [[ "${{ steps.ffmpeg-info.outputs.version }}" != "${{ steps.ffmpeg-autobuild-info.outputs.version }}" ]] ||
-          [[ "${{ steps.ffmpeg-helper-info.outputs.git-sha-short }}" != "${{ steps.ffmpeg-autobuild-info.outputs.helper-git-sha }}" ]]
-          
+        # Safely output true/false instead of crashing the job with an exit code 1
+        run: |
+          if [[ "${{ steps.ffmpeg-info.outputs.version }}" != "${{ steps.ffmpeg-autobuild-info.outputs.version }}" ]] || \
+             [[ "${{ steps.ffmpeg-helper-info.outputs.git-sha-short }}" != "${{ steps.ffmpeg-autobuild-info.outputs.helper-git-sha }}" ]]; then
+            echo "run_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate release tag timestamp
+        id: generate-tag
+        # Generate timestamp once so matrix jobs don't have a race condition
+        run: |
+          echo "build-tag=$(date +'%Y-%m-%d-%H-%M')" >> $GITHUB_OUTPUT
+          echo "run-date=$(date +'%Y-%m-%d %H:%M')" >> $GITHUB_OUTPUT
+
     outputs:
       version: ${{ steps.ffmpeg-info.outputs.version }}
       helper-git-owner: ${{ steps.ffmpeg-helper-info.outputs.git-owner }}
       helper-git-sha: ${{ steps.ffmpeg-helper-info.outputs.git-sha }}
       helper-git-sha-short: ${{ steps.ffmpeg-helper-info.outputs.git-sha-short }}
-      
+      run_build: ${{ steps.check-build.outputs.run_build }}
+      build-tag: ${{ steps.generate-tag.outputs.build-tag }}
+      run-date: ${{ steps.generate-tag.outputs.run-date }}
+
   build:
     needs: check
+    if: needs.check.outputs.run_build == 'true' || inputs.force_build
     runs-on: ubuntu-22.04
+    env:
+      # Suppresses the annoying Node.js 20 deprecation warnings
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       matrix:
         os: [win64, win32]
-        
+
     steps:
       - name: Checkout ${{ needs.check.outputs.helper-git-owner }}/ffmpeg-windows-build-helpers
         uses: actions/checkout@v6
@@ -72,8 +104,13 @@ jobs:
           repository: ${{ needs.check.outputs.helper-git-owner }}/ffmpeg-windows-build-helpers
           ref: ${{ needs.check.outputs.helper-git-sha }}
           persist-credentials: false
-          
+
+      - name: Patch ffmpeg-windows-build-helpers for AOMedia toolchain move
+        # AOMedia moved cmake toolchains from build/cmake/toolchains to cmake/toolchains
+        run: sed -i 's|../build/cmake/toolchains|../cmake/toolchains|g' cross_compile_ffmpeg.sh
+
       - name: Patch mingw-w64-build to avoid savannah.gnu.org dependency
+        # Replace config.guess download with gcc -dumpmachine (host is always x86_64-linux-gnu)
         run: |
           sed -i \
             -e '/wget.*savannah\.gnu\.org/d' \
@@ -82,26 +119,32 @@ jobs:
 
       - name: Install APT dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
+        # gcc-multilib and g++-multilib fix 32-bit CUDA cross-compilation crash
         with:
-          packages: ragel cvs yasm pax nasm gperf autogen autoconf-archive
-          
+          packages: ragel cvs yasm pax nasm gperf autogen autoconf-archive gcc-multilib g++-multilib
+
       - name: Install pip dependencies
         run: sudo -H pip3 -qq install meson ninja
-        
-      - name: Get current date & time before build
-        id: date-time-before
-        run: echo date-time=$(date +'%Y-%m-%d %H:%M') >> $GITHUB_OUTPUT
-        
-      - name: Compile FFmpeg ${{ needs.check.outputs.version }} using ffmpeg-windows-build-helpers ${{ needs.check.outputs.helper-git-sha-short }}
-        run: ./cross_compile_ffmpeg.sh --ffmpeg-git-checkout-version=n${{ needs.check.outputs.version }} --gcc-cpu-count=$(nproc) --disable-nonfree=n --sandbox-ok=y --compiler-flavors=${{ matrix.os }}
-        
-      - name: Get current date & time after build
-        id: date-time-after
+
+      - name: Create fallback timeapi.h for MinGW
+        # Create dummy timeapi.h pointing to mmsystem.h to fix the AMF compilation crash
         run: |
-          echo date-time=$(date +'%Y-%m-%d %H:%M') >> $GITHUB_OUTPUT
-          echo date-time-tag=$(date +'%Y-%m-%d-%H-%M') >> $GITHUB_OUTPUT
-          
+          mkdir -p ${{ github.workspace }}/fallback_headers
+          cat << 'EOF' > ${{ github.workspace }}/fallback_headers/timeapi.h
+          #ifndef _TIMEAPI_H_
+          #define _TIMEAPI_H_
+          #include <windows.h>
+          #include <mmsystem.h>
+          #endif
+          EOF
+
+      - name: Compile FFmpeg ${{ needs.check.outputs.version }} using ffmpeg-windows-build-helpers ${{ needs.check.outputs.helper-git-sha-short }}
+        # Pass --cflags so the compiler finds our dummy timeapi.h
+        run: ./cross_compile_ffmpeg.sh --cflags="-I${{ github.workspace }}/fallback_headers" --ffmpeg-git-checkout-version=n${{ needs.check.outputs.version }} --gcc-cpu-count=$(nproc) --disable-nonfree=n --sandbox-ok=y --compiler-flavors=${{ matrix.os }}
+
       - name: Upload FFmpeg binaries
+        # Skip upload step entirely instead of passing invalid retention-days: 0
+        if: '! inputs.no_release'
         uses: actions/upload-artifact@v7
         with:
           name: ffmpeg-${{ matrix.os }}
@@ -110,75 +153,61 @@ jobs:
             sandbox/${{ matrix.os }}/ffmpeg_git_with_fdk_aac_n${{ needs.check.outputs.version }}/ffprobe.exe
             sandbox/${{ matrix.os }}/ffmpeg_git_with_fdk_aac_n${{ needs.check.outputs.version }}/ffplay.exe
           if-no-files-found: error
-          retention-days: ${{ inputs.no_release && '0' || '1' }}
-          
-    outputs:
-      date-time-before: ${{ steps.date-time-before.outputs.date-time }}
-      date-time-after: ${{ steps.date-time-after.outputs.date-time }}
-      date-time-after-tag: ${{ steps.date-time-after.outputs.date-time-tag }}
-      
+          retention-days: 1
+
   archive:
     permissions:
-      id-token: write
-      attestations: write
+      contents: read
     needs: [check, build]
+    if: needs.check.outputs.run_build == 'true' || inputs.force_build
     runs-on: ubuntu-latest
     strategy:
       matrix:
         os: [win64, win32]
-        
+
     steps:
       - name: Download FFmpeg binaries
         uses: actions/download-artifact@v8
         with:
           name: ffmpeg-${{ matrix.os }}
-          
+
       - name: Create LICENSE
         run: |
           echo "This version of ffmpeg has nonfree parts compiled in." >> LICENSE
           echo "Therefore it is not legally redistributable." >> LICENSE
-          
-      - name: Generate artifact attestation for FFmpeg binaries
-        if: '! inputs.no_release'
-        uses: actions/attest@v4
-        with:
-          subject-path: ff*.exe
-          
+
       - name: 7-Zip FFmpeg binaries
         run: 7z a -mx9 ffmpeg-${{ needs.check.outputs.version }}-${{ needs.check.outputs.helper-git-sha-short }}-${{ matrix.os }}-nonfree.7z ff{mpeg,probe,play}.exe LICENSE
-        
-      - name: Generate artifact attestation for FFmpeg archive
-        if: '! inputs.no_release'
-        uses: actions/attest@v4
-        with:
-          subject-path: ffmpeg-${{ needs.check.outputs.version }}-${{ needs.check.outputs.helper-git-sha-short }}-${{ matrix.os }}-nonfree.7z
-          
+
       - name: Upload FFmpeg archive
+        if: '! inputs.no_release'
         uses: actions/upload-artifact@v7
         with:
           name: ffmpeg-archive-${{ matrix.os }}
           path: ffmpeg-${{ needs.check.outputs.version }}-${{ needs.check.outputs.helper-git-sha-short }}-${{ matrix.os }}-nonfree.7z
-          retention-days: ${{ inputs.no_release && '0' || '1' }}
+          retention-days: 1
           compression-level: 0
-          
+
   release:
     needs: [check, build, archive]
-    if: '! inputs.no_release'
+    if: (needs.check.outputs.run_build == 'true' || inputs.force_build) && !inputs.no_release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download FFmpeg archives
         uses: actions/download-artifact@v8
         with:
           pattern: ffmpeg-archive-*
           merge-multiple: true
-          
+
       - name: Release FFmpeg archives
         run: |
-          gh release create "${{ needs.build.outputs.date-time-after-tag }}-${{ needs.check.outputs.helper-git-sha-short }}-${{ needs.check.outputs.version }}" \
+          gh release create "${{ needs.check.outputs.build-tag }}-${{ needs.check.outputs.helper-git-sha-short }}-${{ needs.check.outputs.version }}" \
           ffmpeg-${{ needs.check.outputs.version }}-${{ needs.check.outputs.helper-git-sha-short }}-{win64,win32}-nonfree.7z \
-          -n "FFmpeg nonfree ${{ needs.check.outputs.version }} built on ${{ needs.build.outputs.date-time-after }} started at ${{ needs.build.outputs.date-time-before }}
+          -n "FFmpeg nonfree ${{ needs.check.outputs.version }} build triggered at ${{ needs.check.outputs.run-date }}
           Using ${{ needs.check.outputs.helper-git-owner }}/ffmpeg-windows-build-helpers git-${{ needs.check.outputs.helper-git-sha }}" \
-          -t "${{ needs.check.outputs.version }} ${{ needs.build.outputs.date-time-after }} ${{ needs.check.outputs.helper-git-sha-short }}"
+          -t "${{ needs.check.outputs.version }} ${{ needs.check.outputs.run-date }} ${{ needs.check.outputs.helper-git-sha-short }}"
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
