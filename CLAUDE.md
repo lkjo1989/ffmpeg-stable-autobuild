@@ -41,15 +41,18 @@ Key files when debugging:
 
 ## Build-time patches applied in workflow
 
-The `build` job applies three inline patches before compiling:
+The `build` job applies four inline patches before compiling:
 
 | Patch | Problem | Fix |
 |-------|---------|-----|
 | AOMedia toolchain path | libaom moved cmake toolchains from `build/cmake/toolchains/` to `cmake/toolchains/` | `sed` in `cross_compile_ffmpeg.sh` |
+| NVENC SDK API rename | NVENC SDK renamed `countingType` → `countingTypeLSB`; FFmpeg source still uses old name | `sed` to patch `nvenc.c` after FFmpeg checkout, injected into `cross_compile_ffmpeg.sh` |
 | Savannah GNU `config.guess` | `savannah.gnu.org/gitweb` is unreliable (502 errors) | Delete wget line, replace `sh config.guess` with `gcc -dumpmachine` |
 | AMF `timeapi.h` | MinGW lacks `timeapi.h`, causing AMF encoder compile crash | Create stub header redirecting to `mmsystem.h`, pass via `--cflags=-I...` |
 
 APT dependencies include `gcc-multilib` and `g++-multilib` to fix 32-bit CUDA cross-compilation.
+
+The build job sets `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` to suppress Node.js 20 deprecation warnings on `ubuntu-22.04` runners. A top-level `concurrency` group ensures only one workflow runs at a time (implicit `cancel-in-progress: true`).
 
 ## Platform assumptions (Windows-only)
 
