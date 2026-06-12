@@ -2,7 +2,7 @@
 
 [FFmpeg](https://ffmpeg.org) stable nonfree release builds for Windows (x86_64 and i686), automatically cross-compiled on Linux via GitHub Actions.
 
-[**Downloads**](https://github.com/AnimMouse/ffmpeg-stable-autobuild/releases) — builds are kept for two years.
+[**Downloads**](https://github.com/lkjo1989/ffmpeg-stable-autobuild/releases) — builds are kept for two years.
 
 ## Features
 
